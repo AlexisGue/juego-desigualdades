@@ -116,6 +116,54 @@ function expr(a, sense, b) {
   return `${fmt(a)} ${sense} ${fmt(b)}`;
 }
 
+function parseIneq(label) {
+  const match = /^(−?\d+) ([<>=]) (−?\d+)$/.exec(String(label).trim());
+  if (!match) return null;
+  const num = (token) => Number(token.replace(/−/g, "-"));
+  return { a: num(match[1]), op: match[2], b: num(match[3]) };
+}
+
+function relationKey(label) {
+  const parsed = parseIneq(label);
+  if (!parsed) return String(label);
+  if (parsed.op === "=") {
+    return `${Math.min(parsed.a, parsed.b)}=${Math.max(parsed.a, parsed.b)}`;
+  }
+  const left = parsed.op === "<" ? parsed.a : parsed.b;
+  const right = parsed.op === "<" ? parsed.b : parsed.a;
+  return `${left}<${right}`;
+}
+
+function statementIsTrue(label) {
+  const parsed = parseIneq(label);
+  if (!parsed) return false;
+  if (parsed.op === "<") return parsed.a < parsed.b;
+  if (parsed.op === ">") return parsed.a > parsed.b;
+  return parsed.a === parsed.b;
+}
+
+function guaranteedFalse(seedA, seedB) {
+  return [
+    expr(seedA, "<", seedA - 1),
+    expr(seedA, ">", seedA + 1),
+    expr(seedB, "<", seedB - 2),
+    expr(seedB, ">", seedB + 2),
+    expr(seedA - 3, ">", seedA),
+    expr(seedB + 3, "<", seedB),
+  ];
+}
+
+const MATH_FAMILIES = {
+  add: true,
+  sub: true,
+  mulpos: true,
+  mulneg: true,
+  divpos: true,
+  divneg: true,
+  transitiva: true,
+  suma: true,
+};
+
 function esc(value) {
   return String(value)
     .replace(/&/g, "&amp;")
@@ -135,18 +183,21 @@ function distinctInts(count, min, max) {
   return [...set];
 }
 
-function fillOptions(correct, pool) {
+function fillOptions(correct, pool, banned) {
   if (!correct) return null;
+  const blocked = new Set(banned || []);
+  const keys = new Set([relationKey(correct)]);
+  (banned || []).forEach((line) => keys.add(relationKey(line)));
   const labels = [correct];
   shuffle(pool.filter(Boolean)).forEach((item) => {
-    if (labels.length < 4 && !labels.includes(item)) labels.push(item);
+    if (labels.length >= 4) return;
+    if (blocked.has(item) || labels.includes(item)) return;
+    const key = relationKey(item);
+    if (keys.has(key)) return;
+    if (statementIsTrue(item)) return;
+    labels.push(item);
+    keys.add(key);
   });
-  let n = 1;
-  while (labels.length < 4 && n < 40) {
-    const filler = expr(n, "<", n + 5);
-    if (filler && !labels.includes(filler)) labels.push(filler);
-    n += 1;
-  }
   if (labels.length !== 4) return null;
   return shuffle(labels.map((label) => ({ label, correct: label === correct })));
 }
@@ -157,6 +208,13 @@ function validChoiceQuestion(question) {
   const labels = question.options.map((option) => option.label);
   if (labels.some((label) => !label || !String(label).trim())) return false;
   if (new Set(labels).size !== 4) return false;
+  if (new Set(labels.map(relationKey)).size !== 4) return false;
+  const lineKeys = new Set((question.lines || []).map(relationKey));
+  if (labels.some((label) => (question.lines || []).includes(label) || lineKeys.has(relationKey(label)))) return false;
+  if (MATH_FAMILIES[question.family]) {
+    const trueOnes = question.options.filter((option) => statementIsTrue(option.label));
+    if (trueOnes.length !== 1 || !trueOnes[0].correct) return false;
+  }
   const correct = question.options.find((option) => option.correct);
   if (question.expect && correct.label !== question.expect) return false;
   if (typeof question.audit === "function" && !question.audit()) return false;
@@ -174,8 +232,8 @@ function cloneFallback() {
     options: shuffle([
       { label: "5 < 8", correct: true },
       { label: "5 > 8", correct: false },
-      { label: "2 < 8", correct: false },
-      { label: "6 < 9", correct: false },
+      { label: "5 < 2", correct: false },
+      { label: "8 < 3", correct: false },
     ]),
     explain: "Sumar 3 conserva el sentido: 2 < 5 pasa a 5 < 8.",
     expect: "5 < 8",
@@ -242,6 +300,9 @@ function attemptApply(family) {
       expr(left + delta, sense, right),
       expr(left, sense, right + delta),
       expr(left - delta, sense, right - delta),
+      expr(left + delta, sense, right - delta),
+      expr(left, flipSense(sense), right),
+      ...guaranteedFalse(newL, newR),
     ];
   } else if (family === "mulpos" || family === "mulneg") {
     const factor = family === "mulneg" ? -randInt(2, 5) : randInt(2, 5);
@@ -263,7 +324,10 @@ function attemptApply(family) {
       expr(newL, flipSense(newSense), newR),
       expr(left * factor, sense, right),
       expr(left, sense, right * factor),
-      expr(left * Math.abs(factor), factor < 0 ? sense : flipSense(sense), right * Math.abs(factor)),
+      expr(left * -factor, sense, right * -factor),
+      expr(left + factor, sense, right + factor),
+      expr(left, flipSense(sense), right),
+      ...guaranteedFalse(newL, newR),
     ];
   } else {
     const factor = family === "divneg" ? -randInt(2, 5) : randInt(2, 5);
@@ -283,19 +347,19 @@ function attemptApply(family) {
       ? `Dividir entre ${fmt(factor)} invierte el sentido, porque el divisor es negativo: ${expr(left, sense, right)} pasa a ${expr(newL, newSense, newR)}.`
       : `Dividir entre ${factor} conserva el sentido, porque el divisor es positivo: ${expr(left, sense, right)} pasa a ${expr(newL, newSense, newR)}.`;
     proof = { kind: "div", left, right, sense, newL, newR, newSense, factor, correct: expr(newL, newSense, newR) };
-    const abs = Math.abs(factor);
     pool = [
       expr(newL, flipSense(newSense), newR),
-      expr(left, sense, right),
-      Number.isInteger(left / abs) && Number.isInteger(right / abs)
-        ? expr(left / abs, sense, right / abs)
-        : null,
-      Number.isInteger(left / factor) ? expr(left / factor, sense, right) : null,
+      expr(newL, sense, right),
+      expr(left, sense, newR),
+      expr(left + factor, sense, right + factor),
+      expr(left, flipSense(sense), right),
+      ...guaranteedFalse(newL, newR),
     ];
   }
 
+  const given = expr(left, sense, right);
   const correct = expr(newL, newSense, newR);
-  const options = fillOptions(correct, pool);
+  const options = fillOptions(correct, pool, [given]);
   if (!options) return null;
   proof.correct = correct;
 
@@ -471,9 +535,9 @@ function attemptTransitive() {
     : [expr(x, "<", y), expr(y, "<", z)];
   const correct = greater ? expr(z, ">", x) : expr(x, "<", z);
   const pool = greater
-    ? [expr(z, "<", x), expr(x, ">", z), `${fmt(z)} = ${fmt(x)}`]
-    : [expr(x, ">", z), expr(z, "<", x), `${fmt(x)} = ${fmt(z)}`];
-  const options = fillOptions(correct, pool);
+    ? [expr(z, "<", x), `${fmt(z)} = ${fmt(x)}`, expr(z, "<", y), expr(y, "<", x), ...guaranteedFalse(z, x)]
+    : [expr(x, ">", z), `${fmt(x)} = ${fmt(z)}`, expr(x, ">", y), expr(y, ">", z), ...guaranteedFalse(x, z)];
+  const options = fillOptions(correct, pool, lines);
   if (!options) return null;
   const explain = greater
     ? `Como ${expr(z, ">", y)} y ${expr(y, ">", x)}, la propiedad transitiva da ${correct}.`
@@ -516,7 +580,9 @@ function attemptSum() {
     expr(a - c, sense, b - d),
     expr(a + d, sense, b + c),
     expr(a + b, sense, c + d),
-  ]);
+    expr(a - d, sense, b - c),
+    ...guaranteedFalse(newL, newR),
+  ], [expr(a, sense, b), expr(c, sense, d)]);
   if (!options) return null;
   return {
     tag: "Suma de desigualdades",
@@ -580,27 +646,46 @@ function attemptZero() {
   };
 }
 
+function takeFresh(factory, used) {
+  let last = null;
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    last = safe(factory);
+    const signature = [
+      last.family,
+      ...(last.lines || []),
+      last.note,
+      last.options.map((option) => relationKey(option.label)).sort().join(","),
+    ].join("|");
+    if (!used.has(signature)) {
+      used.add(signature);
+      return last;
+    }
+  }
+  return last;
+}
+
 function buildRound() {
+  const used = new Set();
   const early = shuffle([
     () => attemptApply("add"),
     () => attemptApply("sub"),
     () => attemptApply("mulpos"),
     () => attemptApply("divpos"),
-  ]).map((factory) => safe(factory));
+  ]).map((factory) => takeFresh(factory, used));
 
   const mid = shuffle([
     () => attemptApply("mulneg"),
     () => attemptApply("divneg"),
     () => attemptApply(Math.random() < 0.5 ? "mulneg" : "divneg"),
     () => attemptSense(),
-  ]).map((factory) => safe(factory));
+  ]).map((factory) => takeFresh(factory, used));
 
   const late = shuffle([
     () => attemptName(),
     () => attemptTransitive(),
     () => attemptSum(),
     () => (Math.random() < 0.5 ? attemptAlways() : attemptZero()),
-  ]).map((factory) => safe(factory));
+  ]).map((factory) => takeFresh(factory, used));
 
   return [...early, ...mid, ...late];
 }

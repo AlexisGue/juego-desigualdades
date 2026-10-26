@@ -142,17 +142,6 @@ function statementIsTrue(label) {
   return parsed.a === parsed.b;
 }
 
-function guaranteedFalse(seedA, seedB) {
-  return [
-    expr(seedA, "<", seedA - 1),
-    expr(seedA, ">", seedA + 1),
-    expr(seedB, "<", seedB - 2),
-    expr(seedB, ">", seedB + 2),
-    expr(seedA - 3, ">", seedA),
-    expr(seedB + 3, "<", seedB),
-  ];
-}
-
 const MATH_FAMILIES = {
   add: true,
   sub: true,
@@ -188,15 +177,19 @@ function fillOptions(correct, pool, banned) {
   const blocked = new Set(banned || []);
   const keys = new Set([relationKey(correct)]);
   (banned || []).forEach((line) => keys.add(relationKey(line)));
-  const labels = [correct];
+  const falseOnes = [];
+  const otherOnes = [];
   shuffle(pool.filter(Boolean)).forEach((item) => {
-    if (labels.length >= 4) return;
-    if (blocked.has(item) || labels.includes(item)) return;
+    if (blocked.has(item) || item === correct) return;
     const key = relationKey(item);
     if (keys.has(key)) return;
-    if (statementIsTrue(item)) return;
-    labels.push(item);
     keys.add(key);
+    if (statementIsTrue(item)) otherOnes.push(item);
+    else falseOnes.push(item);
+  });
+  const labels = [correct];
+  falseOnes.concat(otherOnes).forEach((item) => {
+    if (labels.length < 4) labels.push(item);
   });
   if (labels.length !== 4) return null;
   return shuffle(labels.map((label) => ({ label, correct: label === correct })));
@@ -211,11 +204,8 @@ function validChoiceQuestion(question) {
   if (new Set(labels.map(relationKey)).size !== 4) return false;
   const lineKeys = new Set((question.lines || []).map(relationKey));
   if (labels.some((label) => (question.lines || []).includes(label) || lineKeys.has(relationKey(label)))) return false;
-  if (MATH_FAMILIES[question.family]) {
-    const trueOnes = question.options.filter((option) => statementIsTrue(option.label));
-    if (trueOnes.length !== 1 || !trueOnes[0].correct) return false;
-  }
   const correct = question.options.find((option) => option.correct);
+  if (MATH_FAMILIES[question.family] && !statementIsTrue(correct.label)) return false;
   if (question.expect && correct.label !== question.expect) return false;
   if (typeof question.audit === "function" && !question.audit()) return false;
   return true;
@@ -292,17 +282,18 @@ function attemptApply(family) {
       ? `Resta ${amount} en ambos lados.`
       : `Suma ${amount} en ambos lados.`;
     explain = family === "sub"
-      ? `Restar ${amount} equivale a sumar ${fmt(-amount)}. El sentido se conserva: ${expr(left, sense, right)} pasa a ${expr(newL, newSense, newR)}.`
-      : `Sumar ${amount} en ambos lados conserva el sentido: ${expr(left, sense, right)} pasa a ${expr(newL, newSense, newR)}.`;
+      ? `${fmt(left)} − ${amount} = ${fmt(newL)} y ${fmt(right)} − ${amount} = ${fmt(newR)}. El sentido se conserva, así que queda ${expr(newL, newSense, newR)}.`
+      : `${fmt(left)} + ${amount} = ${fmt(newL)} y ${fmt(right)} + ${amount} = ${fmt(newR)}. El sentido se conserva, así que queda ${expr(newL, newSense, newR)}.`;
     proof = { kind: "add", left, right, sense, newL, newR, newSense, delta, correct: expr(newL, newSense, newR) };
     pool = [
       expr(newL, flipSense(newSense), newR),
+      expr(left, flipSense(sense), right),
+      expr(left + delta, flipSense(sense), right),
+      expr(left, flipSense(sense), right + delta),
+      expr(left - delta, flipSense(sense), right - delta),
       expr(left + delta, sense, right),
       expr(left, sense, right + delta),
       expr(left - delta, sense, right - delta),
-      expr(left + delta, sense, right - delta),
-      expr(left, flipSense(sense), right),
-      ...guaranteedFalse(newL, newR),
     ];
   } else if (family === "mulpos" || family === "mulneg") {
     const factor = family === "mulneg" ? -randInt(2, 5) : randInt(2, 5);
@@ -317,17 +308,17 @@ function attemptApply(family) {
     property = factor < 0 ? "negativo" : "positivo";
     note = `Multiplica ambos lados por ${fmt(factor)}.`;
     explain = factor < 0
-      ? `El factor ${fmt(factor)} es negativo, así que el sentido se invierte: ${expr(left, sense, right)} pasa a ${expr(newL, newSense, newR)}.`
-      : `El factor ${factor} es positivo, así que el sentido se conserva: ${expr(left, sense, right)} pasa a ${expr(newL, newSense, newR)}.`;
+      ? `${fmt(left)} · ${fmt(factor)} = ${fmt(newL)} y ${fmt(right)} · ${fmt(factor)} = ${fmt(newR)}. El factor es negativo, así que el sentido se invierte: ${expr(newL, newSense, newR)}.`
+      : `${fmt(left)} · ${factor} = ${fmt(newL)} y ${fmt(right)} · ${factor} = ${fmt(newR)}. El factor es positivo, así que el sentido se conserva: ${expr(newL, newSense, newR)}.`;
     proof = { kind: "mul", left, right, sense, newL, newR, newSense, factor, correct: expr(newL, newSense, newR) };
     pool = [
       expr(newL, flipSense(newSense), newR),
+      expr(left, flipSense(sense), right),
+      expr(left * factor, flipSense(sense), right),
+      expr(left, flipSense(sense), right * factor),
+      expr(left * -factor, sense, right * -factor),
       expr(left * factor, sense, right),
       expr(left, sense, right * factor),
-      expr(left * -factor, sense, right * -factor),
-      expr(left + factor, sense, right + factor),
-      expr(left, flipSense(sense), right),
-      ...guaranteedFalse(newL, newR),
     ];
   } else {
     const factor = family === "divneg" ? -randInt(2, 5) : randInt(2, 5);
@@ -344,16 +335,16 @@ function attemptApply(family) {
     property = factor < 0 ? "negativo" : "positivo";
     note = `Divide ambos lados entre ${fmt(factor)}.`;
     explain = factor < 0
-      ? `Dividir entre ${fmt(factor)} invierte el sentido, porque el divisor es negativo: ${expr(left, sense, right)} pasa a ${expr(newL, newSense, newR)}.`
-      : `Dividir entre ${factor} conserva el sentido, porque el divisor es positivo: ${expr(left, sense, right)} pasa a ${expr(newL, newSense, newR)}.`;
+      ? `${fmt(left)} ÷ ${fmt(factor)} = ${fmt(newL)} y ${fmt(right)} ÷ ${fmt(factor)} = ${fmt(newR)}. El divisor es negativo, así que el sentido se invierte: ${expr(newL, newSense, newR)}.`
+      : `${fmt(left)} ÷ ${factor} = ${fmt(newL)} y ${fmt(right)} ÷ ${factor} = ${fmt(newR)}. El divisor es positivo, así que el sentido se conserva: ${expr(newL, newSense, newR)}.`;
     proof = { kind: "div", left, right, sense, newL, newR, newSense, factor, correct: expr(newL, newSense, newR) };
     pool = [
       expr(newL, flipSense(newSense), newR),
+      expr(left, flipSense(sense), right),
+      expr(newL, flipSense(sense), right),
+      expr(left, flipSense(sense), newR),
       expr(newL, sense, right),
       expr(left, sense, newR),
-      expr(left + factor, sense, right + factor),
-      expr(left, flipSense(sense), right),
-      ...guaranteedFalse(newL, newR),
     ];
   }
 
@@ -535,8 +526,8 @@ function attemptTransitive() {
     : [expr(x, "<", y), expr(y, "<", z)];
   const correct = greater ? expr(z, ">", x) : expr(x, "<", z);
   const pool = greater
-    ? [expr(z, "<", x), `${fmt(z)} = ${fmt(x)}`, expr(z, "<", y), expr(y, "<", x), ...guaranteedFalse(z, x)]
-    : [expr(x, ">", z), `${fmt(x)} = ${fmt(z)}`, expr(x, ">", y), expr(y, ">", z), ...guaranteedFalse(x, z)];
+    ? [expr(z, "<", x), `${fmt(z)} = ${fmt(x)}`, expr(z, "<", y), expr(y, "<", x)]
+    : [expr(x, ">", z), `${fmt(x)} = ${fmt(z)}`, expr(x, ">", y), expr(y, ">", z)];
   const options = fillOptions(correct, pool, lines);
   if (!options) return null;
   const explain = greater
@@ -577,11 +568,12 @@ function attemptSum() {
   const correct = expr(newL, sense, newR);
   const options = fillOptions(correct, [
     expr(newL, flipSense(sense), newR),
+    expr(a - c, flipSense(sense), b - d),
+    expr(a + d, flipSense(sense), b + c),
+    expr(a + b, flipSense(sense), c + d),
     expr(a - c, sense, b - d),
     expr(a + d, sense, b + c),
     expr(a + b, sense, c + d),
-    expr(a - d, sense, b - c),
-    ...guaranteedFalse(newL, newR),
   ], [expr(a, sense, b), expr(c, sense, d)]);
   if (!options) return null;
   return {
